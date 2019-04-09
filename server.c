@@ -12,6 +12,7 @@
 #include <netinet/in.h> //for INET4 standards
 #include <arpa/inet.h>  //for htons: port byte order conversion
 
+#include <errno.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h> //unix standard, for read system call
@@ -48,6 +49,15 @@ int main(int argc, char** argv){
 	srv_addr.sin_port = port;
 	srv_addr.sin_addr = srv_in_addr;
 	
+	int yes=1; 
+
+	//make port re-usable
+	if (setsockopt(srv_sock,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(int)) == -1) { 
+	    perror("setsockopt"); 
+	    exit(1); 
+	}  	
+
+
 	//bind server socket address
 	if (0!=bind(srv_sock,(struct sockaddr*) &srv_addr, s_addr_size)){
 		printf("Error: Could not bind to port %d.\n", port);
@@ -60,8 +70,10 @@ int main(int argc, char** argv){
 
 	//=============================== FORGING CONNECTIONS  ======================
 	struct sockaddr_in clt_addr;
+//	memset(&clt_addr, 0, sizeof(clt_addr));
+
 	int clt_sock;
-	socklen_t client_size;
+	socklen_t client_size = sizeof(clt_addr);
 	pid_t pid = -1;
 	char msg [256];
 
@@ -85,7 +97,12 @@ int main(int argc, char** argv){
 		if (fds[1].revents & POLLIN){
 			//server socket has someone trying to connect to it
 			printf("Detected a waiting client...\n");
-			clt_sock = accept(srv_sock, (struct sockaddr*)&clt_addr,&client_size); 
+			do{
+				clt_sock = accept(srv_sock, (struct sockaddr*)&clt_addr, &client_size); 
+				if (clt_sock == -1){
+					printf("Error: could not connect to client. errno: %d. Retrying...\n", errno);
+				}
+			} while (clt_sock == -1);
 			printf("Established connection.\n");
 			pid = fork();
 		}
@@ -104,9 +121,11 @@ int main(int argc, char** argv){
 	read(clt_sock, buffer, 256);
 	read(clt_sock, buffer2, 256);
 	//print message
-	printf("Server received: %s\n", buffer);
+	printf("Server received: '%s'\n", buffer);
+	printf("Server received: '%s'\n", buffer2);
 	write(clt_sock, "Welcome to NOSEtunes.\n", 256);
 	
+	printf("Closing connection to client...\n");	
 	close(clt_sock);
 	close(srv_sock);
 	exit(0);
