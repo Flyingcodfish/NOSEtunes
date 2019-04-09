@@ -21,23 +21,24 @@
 
 int main(int argc, char** argv){
 	//parse port
-	if (argc != 2){
-		printf("Error: Please provide only a conneciton port.\n");
+	if (argc != 3){
+		printf("Usage: NOSEtunes [host address] [port]\n");
 		exit(1);
 	}
 	
-	int port = atoi(argv[1]);
+	int port = atoi(argv[2]);
 	if (port==0){
 		printf("Error: Please provide a valid port number.\n");
 		exit(1);
 	}
 	
+	printf("Host: %s\n", argv[1]);	
 	printf("Port: %d\n", port);
 
 	//create address
 	struct in_addr srv_in_addr;
 	struct hostent *srv_host;
-	srv_host = gethostbyname("localhost");
+	srv_host = gethostbyname(argv[1]);
 
 	bcopy((char*)srv_host->h_addr, (char*)&srv_in_addr, srv_host->h_length);
 		
@@ -56,10 +57,13 @@ int main(int argc, char** argv){
 		exit(1);
 	}
 	
-	//send message
-	write(srv_sock, "Cody LaFlamme: 7064-9536\n", 100);
-	char msg[100];
-	read(srv_sock, msg, 100);
+	//send message	
+	char msg[256];
+	//printf("Connected to server. Press enter to continue.\n");
+	//getchar();
+	write(srv_sock, "Cody LaFlamme: 7064-9536\n", 256);
+	write(srv_sock, "Cody LaFlamme2: 7064-9536\n", 256);
+	read(srv_sock, msg, 256);
 	printf("Received message from server: %s", msg);
 	close(srv_sock);
 	exit(0);

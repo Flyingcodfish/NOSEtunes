@@ -7,7 +7,7 @@
  * on a port (fed via command line), and print that message
  */
 
-#include <sys/types.h>
+#include <sys/types.h>	//generally important
 #include <sys/socket.h> //for sockets
 #include <netinet/in.h> //for INET4 standards
 #include <arpa/inet.h>  //for htons: port byte order conversion
@@ -16,7 +16,9 @@
 #include <stdio.h>
 #include <unistd.h> //unix standard, for read system call
 #include <stdlib.h> //c standard: for string parsing
+#include <poll.h>
 
+int process_command(char* cmd, int N);
 
 int main(int argc, char** argv){
 	//parse port
@@ -29,8 +31,6 @@ int main(int argc, char** argv){
 	if (port==0){
 		printf("Error: Please provide a valid port number.\n");
 	}
-	
-	printf("Port: %d\n", port);
 
 	//create inet address (NOT socket address)
 	struct in_addr srv_in_addr;
@@ -50,29 +50,88 @@ int main(int argc, char** argv){
 	
 	//bind server socket address
 	if (0!=bind(srv_sock,(struct sockaddr*) &srv_addr, s_addr_size)){
-		printf("Error: could not bind to port.\n");
+		printf("Error: Could not bind to port %d.\n", port);
+		return 1;
 	}
 	
 	//listen for connection
-	listen(srv_sock, 1);
+	listen(srv_sock, 1);	
+	printf("Listening for connections on port %d.\n", port);	
 
-	//wait for and accept client connection
+	//=============================== FORGING CONNECTIONS  ======================
 	struct sockaddr_in clt_addr;
+	int clt_sock;
 	socklen_t client_size;
-	int clt_sock = accept(srv_sock, (struct sockaddr*)&clt_addr,&client_size); 
-	
-	printf("Established connection.\n");
+	pid_t pid = -1;
+	char msg [256];
+
+	//struct of fil descriptors we will poll: stdin and our server socket
+	struct pollfd fds[2] = {
+		{fd: STDIN_FILENO, events: POLLIN},
+		{fd: srv_sock, events : POLLIN}
+	};
+
+	while(1){
+		//poll stdin and our server socket for events; no timeout
+		poll(fds, 2, -1);
+		
+		//handle each socket with events
+		if (fds[0].revents & POLLIN){
+			//there is something to read from stdin
+			printf("Received command...\n");
+			int N = read(STDIN_FILENO, msg, 256);
+			process_command(msg, N);
+		}
+		if (fds[1].revents & POLLIN){
+			//server socket has someone trying to connect to it
+			printf("Detected a waiting client...\n");
+			clt_sock = accept(srv_sock, (struct sockaddr*)&clt_addr,&client_size); 
+			printf("Established connection.\n");
+			pid = fork();
+		}
+
+		if (pid == 0) break; 	//child thread breaks and handles client
+		//else continue		//parent thread loops and accepts more clients
+	}
+	//============================== HANDLING EXISTING CONNECTIONS ===========
+	char buffer [256];
+	char buffer2 [256];
+	//say hello to new client
+	//write(clt_sock, "hello", 5);
 
 	//read message from client socket
-	char msg[100];
-	read(clt_sock, msg, 100);
 
+	read(clt_sock, buffer, 256);
+	read(clt_sock, buffer2, 256);
 	//print message
-	printf("Server received: %s\n", msg);
-	write(clt_sock, "Welcome to the server running on MINIX\n",100);
-
+	printf("Server received: %s\n", buffer);
+	write(clt_sock, "Welcome to NOSEtunes.\n", 256);
+	
 	close(clt_sock);
 	close(srv_sock);
 	exit(0);
 }
+
+
+int process_command(char* cmd, int N){
+	if (N <= 0) return 1;
+	
+	//we've received a command from stdin. 
+	cmd[N-1] = 0x00;
+	printf("Received command: %s, length: %d\n", cmd, N);
+	return 0;
+} 
+
+
+
+
+
+
+
+
+
+
+
+
+
 
