@@ -40,8 +40,9 @@ int main(int argc, char** argv){
 	struct hostent *srv_host;
 	srv_host = gethostbyname(argv[1]);
 
-	bcopy((char*)srv_host->h_addr, (char*)&srv_in_addr, srv_host->h_length);
-		
+	//bcopy((char*)srv_host->h_addr, (char*)&srv_in_addr, srv_host->h_length);
+	memmove((char*)&srv_in_addr, (char*)srv_host->h_addr_list[0], srv_host->h_length);	
+	
 	struct sockaddr_in srv_addr;
 	memset(&srv_addr, 0, sizeof(srv_addr)); //initialize address struct to 0
 	srv_addr.sin_family = AF_INET;
