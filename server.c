@@ -125,12 +125,12 @@ int main(int argc, char** argv){
 					printf("Error: Could not connect to client. errno: %d. Retrying...\n", errno);
 				}
 			} while (clt_sock == -1);
-			printf("Established connection.\n");
-			pid = fork();
-		}
 
-		if (pid == 0) break; 	//child thread breaks and handles client
-		//else continue		//parent thread loops and accepts more clients
+			pid = fork();
+
+			if ( pid == 0 ) break; //child thread breaks to handle client socket
+			else close(clt_sock); //parent thread ignores client and continues
+		}
 	}
 	if (SHOULD_EXIT){
 		close(srv_sock);
@@ -138,12 +138,14 @@ int main(int argc, char** argv){
 		exit(0);
 	}
 	//============================== HANDLING EXISTING CONNECTIONS ===========
+	printf("Established connection.\n");
 	//prepare to poll client socket
 	struct pollfd child_fds = { .fd = clt_sock, .events = POLLIN };
 	int pollResult;
 	
 	//we are a child thread spawned to handle a client
-	char* inByte;
+	close(srv_sock);
+	unsigned char inByte;
 	int COMMAND_STARTED = 0;
 	int param_length = -1;
 	int param_i = 0;
@@ -164,7 +166,16 @@ int main(int argc, char** argv){
 
 	while(1){	
 		//poll message from client socket
-		pollResult = poll(&child_fds, 1, 8000); //timeout after 8 seconds
+		//pollResult = poll(&child_fds, 1, 8000); //timeout after 8 seconds
+		pollResult = poll(&child_fds, 1, 5*60000); //timeout after 5 minutes
+		
+		if (child_fds.revents & POLLHUP){
+			printf("Client disconnected. Exiting thread.");
+			SHOULD_EXIT = 1;
+			break;
+		}		
+
+
 		if (pollResult == 0){
 			printf("Client timed out.\n");
 			SHOULD_EXIT = 1;
@@ -173,76 +184,118 @@ int main(int argc, char** argv){
 		
 		//read and process message: note that the network cannot preserve packet boundaries.
 		//we may receive half of a command here, or two commands, or half of one and half of another.
-		int N = read(clt_sock, inByte, 1);
-		if (!COMMAND_STARTED && *inByte == 0xBB){ //we are expecting a sync character
+		//we must therefore read everything byte by byte.
+		
+		if (child_fds.revents & POLLIN){
+			int N = read(clt_sock, &inByte, 1);
+		}
+
+		if (!COMMAND_STARTED && inByte == 0xBB){ //we are expecting a sync character
 			COMMAND_STARTED = 1;
+			printf("Received sync byte BB\n");
 		}
-		else if (param_length < 0){ //we are expecting param length byte
-			param_length = *inByte;
-			param_i = 0;
-		}
-		else if (command_code == 0){ //we are expecting a command opcode
-			command_code = *inByte;
-		}
-		else if (param_i < param_length){ //we are expecting some param bytes
-			paramBuffer[param_i++] = *inByte;
-		}
-		else{ //we are expecting nothing, we are done receiving this command
-			int result = process_request(command_code, paramBuffer, param_length, outBuffer, &outN, &player);
-			//send basic ack with value depending on result of process_command
-			ackString[ACK_CMD] = command_code;
-			ackString[ACK_STS] = result;
-			write(clt_sock, ackString, 5);
-
-			//send additional reply if deemed neccessary (if outN > 0)
-			if (outN > 0){
-				write(clt_sock, outBuffer, outN);
+		else if (COMMAND_STARTED){
+			if (param_length < 0){ //we are expecting param length byte
+				param_length = inByte;
+				param_i = 0;
+				printf("Received param length byte %02X\n", inByte);
 			}
-
-			//prepare to receive the next command
-			COMMAND_STARTED = 0;
-			param_length = -1;
-			param_i = 0;
-			command_code = 0;
+			else if (command_code == 0){ //we are expecting a command opcode
+				command_code = inByte;
+				printf("Received command code %02X\n", inByte);
+			}
+			else if (param_i < param_length){ //we are expecting some param bytes
+				paramBuffer[param_i++] = inByte;
+			}
+			if (command_code != 0 && param_i == param_length){
+				//we are expecting nothing, we are done receiving this command
+				int result = process_request(command_code, paramBuffer, param_length, outBuffer, &outN, &player);
+				//send basic ack with value depending on result of process_command
+				printf("Finished receiving %d param bytes.\n", param_length);
+				ackString[ACK_CMD] = command_code;
+				ackString[ACK_STS] = result;
+				printf("Status of last command: %s", (result==0? "Success.\n":"Failure.\n"));
+				if (result == 1) printf("errno: %d\n",errno);
+				write(clt_sock, ackString, 5);
+					
+				//send additional reply if deemed neccessary (if outN > 0)
+				if (result == 0 && outN > 0){
+					write(clt_sock, outBuffer, outN);
+				}
+	
+				//prepare to receive the next command
+				COMMAND_STARTED = 0;
+				param_length = -1;
+				param_i = 0;
+				command_code = 0;
+			}
 		}
 	}
 	//only way to get here is by setting SHOULD_EXIT	
 	printf("Closing connection to client...\n");	
 	close(clt_sock);
-	close(srv_sock);
 	exit(0);
 }
 
 //handles commands received from clients. bad names, I know.
 int process_request(char command, char* params, int pN, char* outBuffer, int* outN, SoundPlayer_t* player_ptr){
 	*outN = 0;
+	int result;
 	switch(command){
 	case 0x01: //ping
-		printf("Pong.");
+		printf("Pong!\n");
 		return 0;
-	case 0x02: //Query Playlist List, NYI
-		return 1;
+	case 0x02: //Query Playlist List
+		printf("Providing list of playlists to client.\n");
+		outBuffer[0] = 0xBB; //sync char
+		outBuffer[1] = NUM_PLAYLISTS;
+		outBuffer[2] = 0x12; //event code
+		for (int i=0; i<NUM_PLAYLISTS; i++){
+			outBuffer[3+i] = PLAYLISTS[i].ID;
+		}
+		*outN = NUM_PLAYLISTS+3;
+		return 0;
 	case 0x03: //Select Playlist
 		if (pN < 1) return 1;
-		printf("Selecting playlist with ID %#04X.", params[0]);
-		return setPlaylist(player_ptr, params[0]);
+		result = setPlaylist(player_ptr, params[0]);
+		if (result == 1) return 1;
+		printf("Selecting playlist with ID %#04X.\n", params[0]);
+		return 0;
 	case 0x04: //Skip song
-		printf("Skipping song...");
-		return setNextSongFile(player_ptr);
+		result = setNextSongFile(player_ptr);
+		if (result == 1) return 1;
+		printf("Skipping song...\n");
+		return 0;
 	case 0x05: //Request sound data
 		//read data from the current sound file
 		//don't print anything here, it'll spam the console
+		//FEAR ME ^^^
 		if (pN < 1) return 1;
 		int numBundles = params[0];
 		if (numBundles > 63) return 1;
 		outBuffer[0] = 0xBB; //sync char
 		outBuffer[1] = numBundles * 4; //data length in bytes, 4 bytes per bundle (2 channels, each gets a 2-byte sample)
 		outBuffer[2] = 0x15; //event code
-		int getSoundResult = getSound(player_ptr, params[0], outBuffer+3); //add 3 to outbuffer so sound is placed after sync, length and command code
+		result = getSound(player_ptr, params[0], outBuffer+3); //add 3 to outbuffer so sound is placed after sync, length and command code
 		*outN = numBundles*4+3;
-		return getSoundResult;
-	case 0x06: //Query playlist name, NYI
-		return 1;
+		if (result == 1) return 1;	
+		printf("Sending %d bundles of sound data!\n", params[0]);
+		return 0;
+	case 0x06: //Query playlist name
+		if (pN < 1) return 1;
+		char* path = getPlaylistWithId(params[0])->path;
+		char* name = strrchr(path, '/')+1;
+		if (name == NULL) return 1;
+		int N = strlen(name);
+		
+		outBuffer[0] = 0xBB; //sync
+		outBuffer[1] = N+1;
+		outBuffer[2] = 0x16; //event code
+		strcpy(&outBuffer[3], name);
+
+		printf("Playlist %#04X is named '%s'\n", params[0], name); 
+		*outN = N+1+3; //include comms bundle (+3) and null character (+1)
+		return 0;
 	default:
 		printf("Received unknown command: %#04X\n", command);
 		return 1;
@@ -277,8 +330,11 @@ int setPlaylist(SoundPlayer_t* player_ptr, char id){
 	//sets the player's playlist directory based on a predetermined playlist ID
 	playlist_t* plist_ptr = getPlaylistWithId(id);
 	if (plist_ptr == NULL) return 1;
-
+	if (player_ptr->playlist_dir != NULL) closedir(player_ptr->playlist_dir);
 	player_ptr->playlist_dir = opendir(plist_ptr->path);
+	readdir(player_ptr->playlist_dir); //skip '.'
+	readdir(player_ptr->playlist_dir); //skip '..'	
+	
 	player_ptr->playlistID = id;
 	if (player_ptr->playlist_dir == NULL) return 1;
 	return 0;
@@ -291,11 +347,21 @@ int setNextSongFile(SoundPlayer_t* player_ptr){
 	if (entry == NULL){
 		//either there's nothing in the directory, or we just need to cycle back to the beginning.
 		rewinddir(player_ptr->playlist_dir);
+		readdir(player_ptr->playlist_dir); //skip '.'
+		readdir(player_ptr->playlist_dir); //skip '..'
+		
 		entry = readdir(player_ptr->playlist_dir);
 		if (entry == NULL) return 1; //there really is nothing in here after all	
 	}
-	fclose(player_ptr->sound_file);
-	player_ptr->sound_file = fopen(entry->d_name, "rb");
+	if (player_ptr->sound_file != NULL) fclose(player_ptr->sound_file);
+
+	char path [256];
+	strcpy(path, PLAYLIST_FOLDER_PATH);
+	strcat(path, getPlaylistWithId(player_ptr->playlistID)->path);
+	strcat(path, entry->d_name);
+	printf("Attempting to open sound file '%s'...\n", path);
+
+	player_ptr->sound_file = fopen(path, "rb");
 	if (player_ptr->sound_file == NULL) return 1;
 	return 0;	
 }
@@ -323,11 +389,6 @@ int process_command(char* cmd, int N){
 	printf("Unrecognized command.\n");
 	return 1;
 } 
-
-
-
-
-
 
 
 

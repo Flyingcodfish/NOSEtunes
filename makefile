@@ -1,6 +1,6 @@
 all: server.out client.out
 
-server.out: server.c
+server.out: server.c playlists.h
 	cc server.c -o server.out -std=c99
 
 client.out: client.c
