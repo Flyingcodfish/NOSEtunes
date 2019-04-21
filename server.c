@@ -7,6 +7,7 @@
  * The command interface is deliberately barebones (ie no JSON).
  * Everything is designed with an 8-bit wifi module in mind.
  */
+#define _XOPEN_SOURCE 700
 
 #include <sys/types.h>	//generally important
 #include <sys/socket.h> //for sockets
@@ -26,8 +27,9 @@
 typedef struct SoundPlayer {
 	char playlistID;
 	FILE* sound_file;
-	DIR * playlist_dir;
-	struct dirent* dir_entry;
+	struct dirent** dir_entrylist;
+	int dir_N;
+	int dir_index;
 } SoundPlayer_t;
 
 
@@ -35,7 +37,10 @@ int process_command(char* cmd, int N);
 int process_request(char command, char* params, int pN, char* outBuffer, int* outN, SoundPlayer_t* player_ptr);
 int getSound(SoundPlayer_t* player_ptr, int numSamples, char* outBuffer);
 int setPlaylist(SoundPlayer_t* player_ptr, char id);
-int setNextSongFile(SoundPlayer_t* player_ptr);
+int seekSongFile(SoundPlayer_t* player_ptr, int offset);
+int nextSongFile(SoundPlayer_t* player_ptr);
+int prevSongFile(SoundPlayer_t* player_ptr);
+
 
 
 int main(int argc, char** argv){
@@ -63,7 +68,7 @@ int main(int argc, char** argv){
 	
 	memset(&srv_addr, 0, s_addr_size); //initialize address struct to 0
 	srv_addr.sin_family = AF_INET;
-	srv_addr.sin_port = port;
+	srv_addr.sin_port = htons(port);
 	srv_addr.sin_addr = srv_in_addr;
 	
 
@@ -162,7 +167,9 @@ int main(int argc, char** argv){
 	SoundPlayer_t player;
 	player.playlistID = 0;
 	player.sound_file = NULL;
-	player.playlist_dir = NULL;
+	player.dir_entrylist = NULL;
+	player.dir_N = 0;
+	player.dir_index = 0;
 
 	while(1){	
 		//poll message from client socket
@@ -192,17 +199,17 @@ int main(int argc, char** argv){
 
 		if (!COMMAND_STARTED && inByte == 0xBB){ //we are expecting a sync character
 			COMMAND_STARTED = 1;
-			printf("Received sync byte BB\n");
+			//printf("Received sync byte BB\n");
 		}
 		else if (COMMAND_STARTED){
 			if (param_length < 0){ //we are expecting param length byte
 				param_length = inByte;
 				param_i = 0;
-				printf("Received param length byte %02X\n", inByte);
+				//printf("Received param length byte %02X\n", inByte);
 			}
 			else if (command_code == 0){ //we are expecting a command opcode
 				command_code = inByte;
-				printf("Received command code %02X\n", inByte);
+				//printf("Received command code %02X\n", inByte);
 			}
 			else if (param_i < param_length){ //we are expecting some param bytes
 				paramBuffer[param_i++] = inByte;
@@ -211,10 +218,10 @@ int main(int argc, char** argv){
 				//we are expecting nothing, we are done receiving this command
 				int result = process_request(command_code, paramBuffer, param_length, outBuffer, &outN, &player);
 				//send basic ack with value depending on result of process_command
-				printf("Finished receiving %d param bytes.\n", param_length);
+				//printf("Finished receiving %d param bytes.\n", param_length);
 				ackString[ACK_CMD] = command_code;
 				ackString[ACK_STS] = result;
-				printf("Status of last command: %s", (result==0? "Success.\n":"Failure.\n"));
+				//printf("Status of last command: %s", (result==0? "Success.\n":"Failure.\n"));
 				if (result == 1) printf("errno: %d\n",errno);
 				write(clt_sock, ackString, 5);
 					
@@ -262,14 +269,12 @@ int process_request(char command, char* params, int pN, char* outBuffer, int* ou
 		printf("Selecting playlist with ID %#04X.\n", params[0]);
 		return 0;
 	case 0x04: //Skip song
-		result = setNextSongFile(player_ptr);
+		result = nextSongFile(player_ptr);
 		if (result == 1) return 1;
 		printf("Skipping song...\n");
 		return 0;
 	case 0x05: //Request sound data
 		//read data from the current sound file
-		//don't print anything here, it'll spam the console
-		//FEAR ME ^^^
 		if (pN < 1) return 1;
 		int numBundles = params[0];
 		if (numBundles > 63) return 1;
@@ -279,11 +284,16 @@ int process_request(char command, char* params, int pN, char* outBuffer, int* ou
 		result = getSound(player_ptr, params[0], outBuffer+3); //add 3 to outbuffer so sound is placed after sync, length and command code
 		*outN = numBundles*4+3;
 		if (result == 1) return 1;	
-		printf("Sending %d bundles of sound data!\n", params[0]);
+		//printf("Sending %d bundles of sound data!\n", params[0]);
 		return 0;
 	case 0x06: //Query playlist name
 		if (pN < 1) return 1;
-		char* path = getPlaylistWithId(params[0])->path;
+		char path[32];
+		strcpy(path, getPlaylistWithId(params[0])->path);
+
+		char* endingSlash = strrchr(path, '/');
+		if (endingSlash == NULL) return 1;
+		*endingSlash = 0x00;
 		char* name = strrchr(path, '/')+1;
 		if (name == NULL) return 1;
 		int N = strlen(name);
@@ -296,6 +306,12 @@ int process_request(char command, char* params, int pN, char* outBuffer, int* ou
 		printf("Playlist %#04X is named '%s'\n", params[0], name); 
 		*outN = N+1+3; //include comms bundle (+3) and null character (+1)
 		return 0;
+
+	case 0x07: //Previous song
+		result = prevSongFile(player_ptr);
+		if (result == 1) return 1;
+		printf("Playing previous song...\n");
+		return 0;
 	default:
 		printf("Received unknown command: %#04X\n", command);
 		return 1;
@@ -307,12 +323,13 @@ int getSound(SoundPlayer_t* player_ptr, int numSamples, char* outBuffer){
 	if (player_ptr == NULL) return 1;
 	//make sure a song and playlist are being read from
 	int result;
-	if (player_ptr->sound_file == NULL) { //no song has been chosen
-		if (player_ptr->playlist_dir == NULL) { //no playlist has been chosen
-			result = setPlaylist(player_ptr, DEFAULT_PLAYLIST_ID); //set to default playlist
-			if (result == 1) return 1;
-		}
-		result = setNextSongFile(player_ptr);
+	
+	if (player_ptr->dir_entrylist == NULL) { //no playlist has been chosen
+		result = setPlaylist(player_ptr, DEFAULT_PLAYLIST_ID); //set to default playlist. sets sound file as well.
+		if (result == 1) return 1;
+	}
+	if (player_ptr->sound_file == NULL) { //no song has been chosen (somehow)
+		result = nextSongFile(player_ptr);
 		if (result == 1) return 1;
 	}
 	
@@ -320,48 +337,71 @@ int getSound(SoundPlayer_t* player_ptr, int numSamples, char* outBuffer){
 	int read_result = fread(outBuffer, 4, numSamples, player_ptr->sound_file);
 	//if we couldn't read enough sound data to satisfy the request, read some from the next file
 	while (read_result < numSamples){
-		if (setNextSongFile(player_ptr) != 0) return 1;
+		if (nextSongFile(player_ptr) != 0) return 1;
 		read_result += fread(outBuffer+4*read_result, 4, numSamples-read_result, player_ptr->sound_file);
 	}
 	return 0;
+}
+
+int filterSoundFiles(const struct dirent * entry){
+	if (strcmp(entry->d_name, ".") == 0) return 0;
+	if (strcmp(entry->d_name, "..") == 0) return 0;
+	return 1;
 }
 
 int setPlaylist(SoundPlayer_t* player_ptr, char id){
 	//sets the player's playlist directory based on a predetermined playlist ID
 	playlist_t* plist_ptr = getPlaylistWithId(id);
 	if (plist_ptr == NULL) return 1;
-	if (player_ptr->playlist_dir != NULL) closedir(player_ptr->playlist_dir);
-	player_ptr->playlist_dir = opendir(plist_ptr->path);
-	readdir(player_ptr->playlist_dir); //skip '.'
-	readdir(player_ptr->playlist_dir); //skip '..'	
-	
+	//free the old directory entry list
+	for (int i=0; i<player_ptr->dir_N; i++){
+		free(player_ptr->dir_entrylist[i]);
+	}
+	free(player_ptr->dir_entrylist);
+	//scan directory for acceptable files
+	int N = scandir(plist_ptr->path, &player_ptr->dir_entrylist, filterSoundFiles, alphasort);
+	if (N < 1){
+		player_ptr->dir_N = 0;
+		player_ptr->dir_entrylist = NULL;
+		return 1;
+	}
+	player_ptr->dir_N = N;
+	//set index to negative one, setNextSongFile increments index once we enter it
+	player_ptr->dir_index = -1;
+	//officially set to new directory
 	player_ptr->playlistID = id;
-	if (player_ptr->playlist_dir == NULL) return 1;
+	nextSongFile(player_ptr);
 	return 0;
 }
 
-int setNextSongFile(SoundPlayer_t* player_ptr){
+int nextSongFile(SoundPlayer_t* player_ptr) {
+	return seekSongFile(player_ptr, 1);
+}
+
+int prevSongFile(SoundPlayer_t* player_ptr) {
+	return seekSongFile(player_ptr, -1);
+}
+
+int seekSongFile(SoundPlayer_t* player_ptr, int offset){
 	//opens next sound file in the directory and closes the current one
-	if (player_ptr->playlist_dir == NULL) return 1;
-	struct dirent* entry = readdir(player_ptr->playlist_dir);
-	if (entry == NULL){
-		//either there's nothing in the directory, or we just need to cycle back to the beginning.
-		rewinddir(player_ptr->playlist_dir);
-		readdir(player_ptr->playlist_dir); //skip '.'
-		readdir(player_ptr->playlist_dir); //skip '..'
-		
-		entry = readdir(player_ptr->playlist_dir);
-		if (entry == NULL) return 1; //there really is nothing in here after all	
-	}
+	if (player_ptr->dir_entrylist == NULL) return 1;
+	if (player_ptr->dir_N < 1) return 1;
 	if (player_ptr->sound_file != NULL) fclose(player_ptr->sound_file);
+	//increment & wrap index
+	player_ptr->dir_index = (player_ptr->dir_index + player_ptr->dir_N + offset) % player_ptr->dir_N;
+	//open the file at this index
+	struct dirent* entry = player_ptr->dir_entrylist[player_ptr->dir_index];
 
 	char path [256];
 	strcpy(path, PLAYLIST_FOLDER_PATH);
 	strcat(path, getPlaylistWithId(player_ptr->playlistID)->path);
 	strcat(path, entry->d_name);
+
+
 	printf("Attempting to open sound file '%s'...\n", path);
 
 	player_ptr->sound_file = fopen(path, "rb");
+//	player_ptr->sound_file = fopen("playlists/test/aa_upWord.raw", "rb");
 	if (player_ptr->sound_file == NULL) return 1;
 	return 0;	
 }

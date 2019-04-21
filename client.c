@@ -49,7 +49,7 @@ int main(int argc, char** argv){
 	struct sockaddr_in srv_addr;
 	memset(&srv_addr, 0, sizeof(srv_addr)); //initialize address struct to 0
 	srv_addr.sin_family = AF_INET;
-	srv_addr.sin_port = port;
+	srv_addr.sin_port = htons(port);
 	srv_addr.sin_addr = srv_in_addr;
 
 	//create socket
