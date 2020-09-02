@@ -222,7 +222,7 @@ int main(int argc, char** argv){
 				ackString[ACK_CMD] = command_code;
 				ackString[ACK_STS] = result;
 				//printf("Status of last command: %s", (result==0? "Success.\n":"Failure.\n"));
-				if (result == 1) printf("errno: %d\n",errno);
+				if (result == 1) printf("Could not process command. errno: %d\n",errno);
 				write(clt_sock, ackString, 5);
 					
 				//send additional reply if deemed neccessary (if outN > 0)
